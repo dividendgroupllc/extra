@@ -1,0 +1,301 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "naming_series:",
+ "creation": "2025-01-21 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "date",
+  "transaction_type",
+  "balance",
+  "column_break_1",
+  "mode_of_payment",
+  "cash_account_currency",
+  "company",
+  "mode_of_payment_to",
+  "cash_account",
+  "cash_account_to",
+  "section_break_transfer",
+  "column_break_transfer",
+  "balance_to",
+  "section_break_party",
+  "party_type",
+  "party",
+  "party_name",
+  "party_currency",
+  "column_break_2",
+  "expense_account",
+  "expense_account_name",
+  "section_break_amount",
+  "column_break_3",
+  "amount",
+  "section_break_details",
+  "remarks",
+  "section_break_linked",
+  "linked_doctype",
+  "linked_entry",
+  "amended_from"
+ ],
+ "fields": [
+  {
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Series",
+   "options": "KASSA-.YYYY.-",
+   "reqd": 1
+  },
+  {
+   "default": "Today",
+   "fieldname": "date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Дата",
+   "reqd": 1
+  },
+  {
+   "fieldname": "transaction_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Тип операции",
+   "options": "\nПриход\nРасход\nПеремещения",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "mode_of_payment",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Способ оплаты",
+   "options": "Mode of Payment",
+   "reqd": 1
+  },
+  {
+   "fieldname": "cash_account",
+   "fieldtype": "Link",
+   "hidden": 1,
+   "label": "Cash Account",
+   "options": "Account",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:in_list(['Приход', 'Расход'], doc.transaction_type) && doc.mode_of_payment",
+   "fieldname": "cash_account_currency",
+   "fieldtype": "Data",
+   "label": "Валюта кассы",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.transaction_type !== 'Перемещения'",
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Компания",
+   "options": "Company",
+   "mandatory_depends_on": "eval:doc.transaction_type !== 'Перемещения'"
+  },
+  {
+   "depends_on": "eval:doc.transaction_type === 'Перемещения'",
+   "fieldname": "mode_of_payment_to",
+   "fieldtype": "Link",
+   "label": "Способ оплаты (куда)",
+   "options": "Mode of Payment"
+  },
+  {
+   "depends_on": "eval:doc.transaction_type === 'Перемещения' && doc.mode_of_payment_to",
+   "fieldname": "section_break_transfer",
+   "fieldtype": "Section Break",
+   "label": "Остаток (куда)"
+  },
+  {
+   "fieldname": "cash_account_to",
+   "fieldtype": "Link",
+   "hidden": 1,
+   "label": "Cash Account To",
+   "options": "Account",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_transfer",
+   "fieldtype": "Column Break",
+   "hidden": 1
+  },
+  {
+   "fieldname": "balance_to",
+   "fieldtype": "Currency",
+   "label": "Остаток (куда)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_party",
+   "fieldtype": "Section Break",
+   "label": "Контрагент"
+  },
+  {
+   "depends_on": "eval:in_list(['Приход', 'Расход'], doc.transaction_type)",
+   "fieldname": "party_type",
+   "fieldtype": "Select",
+   "label": "Тип контрагента",
+   "options": "\nCustomer\nSupplier\nShareholder\nEmployee\nДивиденд\nРасходы"
+  },
+  {
+   "depends_on": "eval:doc.party_type && doc.party_type !== 'Расходы' && doc.party_type !== 'Дивиденд'",
+   "fieldname": "party",
+   "fieldtype": "Dynamic Link",
+   "label": "Контрагент",
+   "options": "party_type"
+  },
+  {
+   "fieldname": "party_name",
+   "fieldtype": "Data",
+   "label": "Имя контрагента",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.party && in_list(['Customer', 'Supplier'], doc.party_type)",
+   "fieldname": "party_currency",
+   "fieldtype": "Data",
+   "label": "Валюта контрагента",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "eval:doc.party_type === 'Расходы'",
+   "fieldname": "expense_account",
+   "fieldtype": "Link",
+   "label": "Счет расходов",
+   "options": "Account"
+  },
+  {
+   "fetch_from": "expense_account.account_name",
+   "fieldname": "expense_account_name",
+   "fieldtype": "Data",
+   "label": "Название счета",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_amount",
+   "fieldtype": "Section Break",
+   "label": "Сумма"
+  },
+  {
+   "depends_on": "eval:doc.transaction_type && doc.mode_of_payment",
+   "fieldname": "balance",
+   "fieldtype": "Currency",
+   "label": "Остаток",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_3",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Сумма",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_details",
+   "fieldtype": "Section Break",
+   "label": "Дополнительно"
+  },
+  {
+   "fieldname": "remarks",
+   "fieldtype": "Small Text",
+   "label": "Примечание"
+  },
+  {
+   "fieldname": "section_break_linked",
+   "fieldtype": "Section Break",
+   "label": "Связанный документ"
+  },
+  {
+   "fieldname": "linked_doctype",
+   "fieldtype": "Select",
+   "label": "Тип документа",
+   "options": "\nPayment Entry\nJournal Entry",
+   "read_only": 1
+  },
+  {
+   "fieldname": "linked_entry",
+   "fieldtype": "Dynamic Link",
+   "label": "Связанный документ",
+   "options": "linked_doctype",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "no_copy": 1,
+   "options": "Kassa",
+   "print_hide": 1,
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-02-20 22:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Extra",
+ "name": "Kassa",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts User",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
