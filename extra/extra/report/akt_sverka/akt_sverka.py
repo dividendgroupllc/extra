@@ -45,7 +45,6 @@ def get_columns():
         {"label": "Дебет",          "fieldname": "debit",           "fieldtype": "Currency",     "width": 83},
         {"label": "Қолдиқ (Кред)",  "fieldname": "balance_credit",  "fieldtype": "Currency",     "width": 85},
         {"label": "Қолдиқ (Деб)",   "fieldname": "balance_debit",   "fieldtype": "Currency",     "width": 85},
-        {"label": "Коммент",        "fieldname": "komment",         "fieldtype": "Data",         "width": 290},
         {"label": "Валюта",         "fieldname": "currency",        "fieldtype": "Link",         "options": "Currency", "width": 65},
         {"label": "",               "fieldname": "voucher_doctype", "fieldtype": "Data",         "width": 0,  "hidden": 1},
     ]
@@ -247,7 +246,6 @@ def get_data(filters):
                             "currency": item.get('currency', gl.currency),
                             "credit": abs(item_amount), "debit": 0,
                             "balance": format_balance(balance) if is_last else None,
-                            "komment": item.get('komment') or "",
                         })
                     else:
                         data.append({
@@ -260,18 +258,8 @@ def get_data(filters):
                             "currency": item.get('currency', gl.currency),
                             "credit": 0, "debit": item_amount,
                             "balance": format_balance(balance) if is_last else None,
-                            "komment": item.get('komment') or "",
                         })
             else:
-                si_komment_row = frappe.db.sql("""
-                    SELECT COALESCE(NULLIF(si.custom_komment, ''), so.custom_komment, '') as komment
-                    FROM `tabSales Invoice` si
-                    LEFT JOIN `tabSales Invoice Item` sii ON sii.parent = si.name
-                    LEFT JOIN `tabSales Order` so ON so.name = sii.sales_order
-                    WHERE si.name = %s
-                    LIMIT 1
-                """, (voucher_no,), as_dict=True)
-                si_komment = (si_komment_row[0].komment if si_komment_row else "") or ""
                 if is_return:
                     balance += flt(gl.credit)
                     data.append({
@@ -283,7 +271,6 @@ def get_data(filters):
                         "currency": gl.currency,
                         "credit": gl.credit, "debit": 0,
                         "balance": format_balance(balance),
-                        "komment": si_komment,
                     })
                 else:
                     balance -= flt(gl.debit)
@@ -296,11 +283,10 @@ def get_data(filters):
                         "currency": gl.currency,
                         "credit": 0, "debit": gl.debit,
                         "balance": format_balance(balance),
-                        "komment": si_komment,
                     })
 
         elif voucher_type == "Payment Entry":
-            pe_info = pe_info_map.get(voucher_no, {'description': '', 'account': '', 'komment': ''})
+            pe_info = pe_info_map.get(voucher_no, {'description': '', 'account': ''})
             balance += flt(gl.credit) - flt(gl.debit)
             data.append({
                 "posting_date": gl.posting_date,
@@ -311,7 +297,6 @@ def get_data(filters):
                 "currency": gl.currency,
                 "credit": gl.credit, "debit": gl.debit,
                 "balance": format_balance(balance),
-                "komment": pe_info.get('komment', ''),
             })
 
         elif voucher_type == "Journal Entry":
@@ -336,7 +321,6 @@ def get_data(filters):
                         "credit": acc.get('credit', 0),
                         "debit": acc.get('debit', 0),
                         "balance": format_balance(balance) if is_last else None,
-                        "komment": acc.get('komment') or '',
                     })
             else:
                 balance += flt(gl.credit) - flt(gl.debit)
@@ -489,11 +473,9 @@ def prefetch_sales_invoice_items(voucher_nos):
             sii.rate,
             si.currency,
             0 as credit,
-            sii.amount as debit,
-            COALESCE(NULLIF(si.custom_komment, ''), so.custom_komment, '') as komment
+            sii.amount as debit
         FROM `tabSales Invoice Item` sii
         INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
-        LEFT JOIN `tabSales Order` so ON so.name = sii.sales_order
         WHERE sii.parent IN %s
         ORDER BY sii.parent, sii.idx
     """, (voucher_list,), as_dict=True)
@@ -519,25 +501,19 @@ def prefetch_invoice_return_status(doctype, voucher_nos):
 def prefetch_payment_entry_info(voucher_nos):
     voucher_list = list(voucher_nos)
     payments = frappe.db.sql("""
-        SELECT pe.name, pe.payment_type, pe.paid_from, pe.paid_to,
-               k.remarks as komment
+        SELECT pe.name, pe.payment_type, pe.paid_from, pe.paid_to
         FROM `tabPayment Entry` pe
-        LEFT JOIN `tabKassa` k
-               ON k.linked_entry = pe.name
-              AND k.linked_doctype = 'Payment Entry'
-              AND k.docstatus = 1
         WHERE pe.name IN %s
     """, (voucher_list,), as_dict=True)
 
     result = {}
     for p in payments:
-        komment = p.komment or ""
         if p.payment_type == 'Pay':
-            result[p.name] = {'description': 'Pay', 'account': p.paid_from, 'komment': komment}
+            result[p.name] = {'description': 'Pay', 'account': p.paid_from}
         elif p.payment_type == 'Receive':
-            result[p.name] = {'description': 'Receive', 'account': p.paid_to, 'komment': komment}
+            result[p.name] = {'description': 'Receive', 'account': p.paid_to}
         else:
-            result[p.name] = {'description': p.payment_type, 'account': p.paid_from or p.paid_to, 'komment': komment}
+            result[p.name] = {'description': p.payment_type, 'account': p.paid_from or p.paid_to}
     return result
 
 
@@ -548,13 +524,8 @@ def prefetch_journal_entry_accounts(voucher_nos, party_type, party):
             jea.parent as voucher_no,
             jea.account,
             jea.debit_in_account_currency as debit,
-            jea.credit_in_account_currency as credit,
-            k.remarks as komment
+            jea.credit_in_account_currency as credit
         FROM `tabJournal Entry Account` jea
-        LEFT JOIN `tabKassa` k
-               ON k.linked_entry = jea.parent
-              AND k.linked_doctype = 'Journal Entry'
-              AND k.docstatus = 1
         WHERE jea.parent IN %s
           AND jea.party_type = %s
           AND jea.party = %s
