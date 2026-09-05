@@ -33,6 +33,65 @@ def get_voucher_doctype(voucher_type):
     return voucher_type.split(" (", 1)[0]
 
 
+def get_default_party_currency(party_type, party):
+    """GL yozuvi bo'lmaganda: kontragentning o'z valyutasi, bo'lmasa kompaniya valyutasi"""
+    currency = None
+    if party_type in ("Customer", "Supplier") and party:
+        currency = frappe.db.get_value(party_type, party, "default_currency")
+
+    if not currency:
+        company = (
+            frappe.defaults.get_user_default("Company")
+            or frappe.db.get_single_value("Global Defaults", "default_company")
+        )
+        if company:
+            currency = frappe.get_cached_value("Company", company, "default_currency")
+
+    return currency or frappe.db.get_single_value("Global Defaults", "default_currency") or "USD"
+
+
+def get_account_currency_factor(gl):
+    """Kompaniya valyutasidan hisob (kontragent) valyutasiga o'tkazish koeffitsienti.
+
+    GL yozuvida ikkala qiymat ham bor: debit/credit (kompaniya valyutasi) va
+    debit/credit_in_account_currency (hisob valyutasi). Ularning nisbati — aynan
+    shu hujjat uchun qo'llangan kurs.
+    """
+    base_total = flt(gl.get("base_debit")) + flt(gl.get("base_credit"))
+    account_total = flt(gl.get("debit")) + flt(gl.get("credit"))
+    if base_total and account_total:
+        return account_total / base_total
+    return 1.0
+
+
+def convert_items_to_party_currency(items, gl, party_currency):
+    """Invoice item summalarini kontragent (GL hisobi) valyutasiga o'tkazish.
+
+    Invoice valyutasi kontragent valyutasiga teng bo'lsa — amount/rate o'zgarishsiz.
+    Aks holda base_amount/base_rate (kompaniya valyutasi) GL kursi orqali o'tkaziladi,
+    shunda qator summalari "Валюта" ustunidagi valyutaga mos bo'ladi.
+    """
+    factor = None
+    result = []
+    for item in items:
+        if item.get("currency") == party_currency:
+            rate = flt(item.get("rate"))
+            amount = flt(item.get("amount"))
+        else:
+            if factor is None:
+                factor = get_account_currency_factor(gl)
+            rate = flt(flt(item.get("base_rate")) * factor, 2)
+            amount = flt(flt(item.get("base_amount")) * factor, 2)
+
+        result.append({
+            "item_name": item.get("item_name", ""),
+            "qty": item.get("qty"),
+            "rate": rate,
+            "amount": amount,
+        })
+    return result
+
+
 def get_columns():
     return [
         {"label": "Сана",           "fieldname": "posting_date",    "fieldtype": "Date",         "width": 85},
@@ -64,7 +123,7 @@ def get_data(filters):
         ORDER BY posting_date ASC, creation ASC
         LIMIT 1
     """, (party_type, party))
-    party_currency = party_currency[0][0] if party_currency else 'USD'
+    party_currency = party_currency[0][0] if party_currency else get_default_party_currency(party_type, party)
 
     # Opening balance - 1 ta query bilan hamma voucher type'larni hisoblaymiz
     opening_balance = calculate_opening_balance_optimized(
@@ -97,6 +156,8 @@ def get_data(filters):
             gl.voucher_no,
             gl.debit_in_account_currency as debit,
             gl.credit_in_account_currency as credit,
+            gl.debit as base_debit,
+            gl.credit as base_credit,
             gl.account_currency AS currency
         FROM `tabGL Entry` gl
         WHERE gl.posting_date BETWEEN %s AND %s
@@ -164,10 +225,11 @@ def get_data(filters):
                 if voucher_no in seen_pi_vouchers:
                     continue
                 seen_pi_vouchers.add(voucher_no)
-                total_amount = sum(flt(item.get('credit', 0)) for item in items)
+                items = convert_items_to_party_currency(items, gl, party_currency)
+                total_amount = sum(flt(item.get('amount', 0)) for item in items)
                 for idx, item in enumerate(items):
                     is_last = (idx == len(items) - 1)
-                    item_amount = flt(item.get('credit', 0))
+                    item_amount = flt(item.get('amount', 0))
                     if is_last:
                         balance += total_amount
                     if is_return:
@@ -178,7 +240,7 @@ def get_data(filters):
                             "item_name": item.get('item_name', ''),
                             "qty": format_qty(abs(flt(item.get('qty')))),
                             "rate": item.get('rate'),
-                            "currency": item.get('currency', gl.currency),
+                            "currency": party_currency,
                             "credit": 0,
                             "debit": abs(item_amount),
                             "balance": format_balance(balance) if is_last else None,
@@ -191,7 +253,7 @@ def get_data(filters):
                             "item_name": item.get('item_name', ''),
                             "qty": format_qty(item.get('qty')),
                             "rate": item.get('rate'),
-                            "currency": item.get('currency', gl.currency),
+                            "currency": party_currency,
                             "credit": item_amount,
                             "debit": 0,
                             "balance": format_balance(balance) if is_last else None,
@@ -229,10 +291,11 @@ def get_data(filters):
                 if voucher_no in seen_si_vouchers:
                     continue
                 seen_si_vouchers.add(voucher_no)
-                total_amount = sum(flt(item.get('debit', 0)) for item in items)
+                items = convert_items_to_party_currency(items, gl, party_currency)
+                total_amount = sum(flt(item.get('amount', 0)) for item in items)
                 for idx, item in enumerate(items):
                     is_last = (idx == len(items) - 1)
-                    item_amount = flt(item.get('debit', 0))
+                    item_amount = flt(item.get('amount', 0))
                     if is_last:
                         balance -= total_amount
                     if is_return:
@@ -243,7 +306,7 @@ def get_data(filters):
                             "item_name": item.get('item_name', ''),
                             "qty": format_qty(abs(flt(item.get('qty')))),
                             "rate": item.get('rate'),
-                            "currency": item.get('currency', gl.currency),
+                            "currency": party_currency,
                             "credit": abs(item_amount), "debit": 0,
                             "balance": format_balance(balance) if is_last else None,
                         })
@@ -255,7 +318,7 @@ def get_data(filters):
                             "item_name": item.get('item_name', ''),
                             "qty": format_qty(item.get('qty')),
                             "rate": item.get('rate'),
-                            "currency": item.get('currency', gl.currency),
+                            "currency": party_currency,
                             "credit": 0, "debit": item_amount,
                             "balance": format_balance(balance) if is_last else None,
                         })
@@ -448,9 +511,10 @@ def prefetch_purchase_invoice_items(voucher_nos):
             pii.item_name,
             pii.qty,
             pii.rate,
-            pi.currency,
-            pii.amount as credit,
-            0 as debit
+            pii.base_rate,
+            pii.amount,
+            pii.base_amount,
+            pi.currency
         FROM `tabPurchase Invoice Item` pii
         INNER JOIN `tabPurchase Invoice` pi ON pi.name = pii.parent
         WHERE pii.parent IN %s
@@ -471,9 +535,10 @@ def prefetch_sales_invoice_items(voucher_nos):
             sii.item_name,
             sii.qty,
             sii.rate,
-            si.currency,
-            0 as credit,
-            sii.amount as debit
+            sii.base_rate,
+            sii.amount,
+            sii.base_amount,
+            si.currency
         FROM `tabSales Invoice Item` sii
         INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
         WHERE sii.parent IN %s

@@ -344,6 +344,12 @@ class Kassa(Document):
         if self.cash_account:
             self.cash_account_currency = frappe.get_cached_value("Account", self.cash_account, "account_currency")
 
+        # Transfer uchun: qabul qiluvchi kassa valyutasi (balance_to shu valyutada ko'rsatiladi)
+        if self.cash_account_to:
+            self.cash_account_to_currency = frappe.get_cached_value("Account", self.cash_account_to, "account_currency")
+        else:
+            self.cash_account_to_currency = None
+
     def set_party_currency(self):
         """Party default valyutasini olish"""
         if self.party and self.party_type in ["Customer", "Supplier"] and self.company:

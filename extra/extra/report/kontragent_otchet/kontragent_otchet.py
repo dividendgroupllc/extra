@@ -1,6 +1,16 @@
 import frappe
 from frappe.utils import flt
 
+TOTAL_KEYS = (
+    "opening_credit_usd",
+    "opening_debit_usd",
+    "period_credit_usd",
+    "period_debit_usd",
+    "final_credit_usd",
+    "final_debit_usd",
+)
+
+
 def execute(filters=None):
     if not filters:
         return [], []
@@ -26,6 +36,18 @@ def get_columns(filters):
     ]
 
     return columns
+
+
+def get_default_currency():
+    """GL yozuvida valyuta bo'lmasa: kompaniya valyutasi, bo'lmasa global default"""
+    company = (
+        frappe.defaults.get_user_default("Company")
+        or frappe.db.get_single_value("Global Defaults", "default_company")
+    )
+    currency = None
+    if company:
+        currency = frappe.get_cached_value("Company", company, "default_currency")
+    return currency or frappe.db.get_single_value("Global Defaults", "default_currency") or "USD"
 
 
 def get_data(filters):
@@ -56,10 +78,14 @@ def get_data(filters):
 
     where_clause = " AND ".join(conditions)
 
+    # Summalar *_in_account_currency ustunlaridan olinadi, shuning uchun
+    # guruhlash account_currency bo'yicha ham qilinadi: har bir qator faqat
+    # bitta valyutadagi yozuvlarni yig'adi va "Валюта" ustuni aynan shu valyutani ko'rsatadi.
     results = frappe.db.sql("""
         SELECT
             party_type,
             party,
+            account_currency AS currency,
             IFNULL(SUM(CASE WHEN posting_date < %(from_date)s THEN credit_in_account_currency ELSE 0 END), 0) as opening_credit,
             IFNULL(SUM(CASE WHEN posting_date < %(from_date)s THEN debit_in_account_currency ELSE 0 END), 0) as opening_debit,
             IFNULL(SUM(CASE WHEN posting_date BETWEEN %(from_date)s AND %(to_date)s THEN credit_in_account_currency ELSE 0 END), 0) as period_credit,
@@ -67,36 +93,13 @@ def get_data(filters):
         FROM `tabGL Entry`
         WHERE {where_clause}
           AND posting_date <= %(to_date)s
-        GROUP BY party_type, party
-        ORDER BY party_type, party
+        GROUP BY party_type, party, account_currency
+        ORDER BY party_type, party, account_currency
     """.format(where_clause=where_clause), values, as_dict=True)
 
-    currency_results = frappe.db.sql("""
-        SELECT party_type, party, account_currency
-        FROM `tabGL Entry` ge1
-        WHERE {where_clause}
-          AND creation = (
-              SELECT MAX(creation) FROM `tabGL Entry` ge2
-              WHERE ge2.party_type = ge1.party_type
-                AND ge2.party = ge1.party
-                AND ge2.is_cancelled = 0
-          )
-        GROUP BY party_type, party
-    """.format(where_clause=where_clause), values, as_dict=True)
-
-    currency_map = {}
-    for c in currency_results:
-        currency_map[(c.party_type, c.party)] = c.account_currency
-
+    default_currency = None
     data = []
-    totals = {
-        "opening_credit_usd": 0,
-        "opening_debit_usd": 0,
-        "period_credit_usd": 0,
-        "period_debit_usd": 0,
-        "final_credit_usd": 0,
-        "final_debit_usd": 0,
-    }
+    totals_by_currency = {}
 
     for r in results:
         opening_net = flt(r.opening_credit - r.opening_debit, 2)
@@ -104,7 +107,11 @@ def get_data(filters):
         period_debit = flt(r.period_debit, 2)
         final_net = flt(opening_net + period_credit - period_debit, 2)
 
-        currency = currency_map.get((r.party_type, r.party), "USD")
+        currency = r.currency
+        if not currency:
+            if default_currency is None:
+                default_currency = get_default_currency()
+            currency = default_currency
 
         row = {
             "party_type": r.party_type,
@@ -120,16 +127,18 @@ def get_data(filters):
         }
         data.append(row)
 
-        for key in totals:
+        totals = totals_by_currency.setdefault(currency, {key: 0 for key in TOTAL_KEYS})
+        for key in TOTAL_KEYS:
             totals[key] += row.get(key, 0)
 
-    if data:
+    # ЖАМИ — har bir valyuta uchun alohida (turli valyutalar qo'shilmaydi)
+    for currency, totals in totals_by_currency.items():
         total_row = {
             "party_type": "",
             "party": "ЖАМИ",
-            "currency": "",
+            "currency": currency,
             "akt_sverka_link": "",
-            "is_total_row": True
+            "is_total_row": True,
         }
         total_row.update(totals)
         data.append(total_row)

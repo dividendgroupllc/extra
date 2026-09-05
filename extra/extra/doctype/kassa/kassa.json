@@ -17,6 +17,7 @@
   "mode_of_payment_to",
   "cash_account",
   "cash_account_to",
+  "cash_account_to_currency",
   "section_break_transfer",
   "column_break_transfer",
   "balance_to",
@@ -94,8 +95,8 @@
    "fieldname": "company",
    "fieldtype": "Link",
    "label": "Компания",
-   "options": "Company",
-   "mandatory_depends_on": "eval:doc.transaction_type !== 'Перемещения'"
+   "mandatory_depends_on": "eval:doc.transaction_type !== 'Перемещения'",
+   "options": "Company"
   },
   {
    "depends_on": "eval:doc.transaction_type === 'Перемещения'",
@@ -119,6 +120,13 @@
    "read_only": 1
   },
   {
+   "fieldname": "cash_account_to_currency",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Валюта кассы (куда)",
+   "read_only": 1
+  },
+  {
    "fieldname": "column_break_transfer",
    "fieldtype": "Column Break",
    "hidden": 1
@@ -127,6 +135,7 @@
    "fieldname": "balance_to",
    "fieldtype": "Currency",
    "label": "Остаток (куда)",
+   "options": "cash_account_to_currency",
    "read_only": 1
   },
   {
@@ -189,6 +198,7 @@
    "fieldname": "balance",
    "fieldtype": "Currency",
    "label": "Остаток",
+   "options": "cash_account_currency",
    "read_only": 1
   },
   {
@@ -200,6 +210,7 @@
    "fieldtype": "Currency",
    "in_list_view": 1,
    "label": "Сумма",
+   "options": "cash_account_currency",
    "reqd": 1
   },
   {
@@ -244,7 +255,7 @@
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-02-20 22:00:00.000000",
+ "modified": "2026-09-04 20:12:33.967358",
  "modified_by": "Administrator",
  "module": "Extra",
  "name": "Kassa",

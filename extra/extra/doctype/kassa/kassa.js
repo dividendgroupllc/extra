@@ -82,6 +82,7 @@ frappe.ui.form.on("Kassa", {
         if (frm.doc.transaction_type === "Перемещения") {
             frm.set_value("mode_of_payment_to", "");
             frm.set_value("cash_account_to", "");
+            frm.set_value("cash_account_to_currency", "");
             frm.set_value("balance_to", 0);
             frm.trigger("set_mode_of_payment_to_query");
         }
@@ -116,6 +117,7 @@ frappe.ui.form.on("Kassa", {
         frm.set_value("balance", 0);
         frm.set_value("mode_of_payment_to", "");
         frm.set_value("cash_account_to", "");
+        frm.set_value("cash_account_to_currency", "");
         frm.set_value("balance_to", 0);
 
         // Set queries
@@ -146,24 +148,27 @@ frappe.ui.form.on("Kassa", {
     mode_of_payment_to: function(frm) {
         if (frm.doc.mode_of_payment_to && frm.doc.company) {
             frappe.call({
-                method: "extra.extra.doctype.kassa.kassa.get_cash_account",
+                method: "extra.extra.doctype.kassa.kassa.get_cash_account_with_currency",
                 args: {
                     mode_of_payment: frm.doc.mode_of_payment_to,
                     company: frm.doc.company
                 },
                 callback: function(r) {
-                    if (r.message) {
-                        frm.set_value("cash_account_to", r.message);
+                    if (r.message && r.message.account) {
+                        frm.set_value("cash_account_to", r.message.account);
+                        frm.set_value("cash_account_to_currency", r.message.currency);
                         frm.trigger("update_balance_to");
                     } else {
                         frappe.msgprint(__("Для данного способа оплаты не настроен счет кассы для компании {0}", [frm.doc.company]));
                         frm.set_value("cash_account_to", "");
+                        frm.set_value("cash_account_to_currency", "");
                         frm.set_value("balance_to", 0);
                     }
                 }
             });
         } else {
             frm.set_value("cash_account_to", "");
+            frm.set_value("cash_account_to_currency", "");
             frm.set_value("balance_to", 0);
         }
     },
