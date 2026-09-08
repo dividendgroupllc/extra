@@ -1,27 +1,4 @@
 frappe.query_reports["Akt Sverka"] = {
-    "after_datatable_render": function(datatable_obj) {
-        try {
-            var report = frappe.query_report;
-            var html = report && report.report_doc ? null : null;
-            // message slotidagi summary HTML ni olish
-            var msg = report && report.message ? report.message : null;
-            if (!msg && report && report.raw_data) {
-                msg = report.raw_data.message;
-            }
-            var $area = report.$report.find('.akt-sverka-summary');
-            if (!$area.length) {
-                $area = $('<div class="akt-sverka-summary"></div>');
-                report.$report.prepend($area);
-            }
-            if (msg) {
-                $area.html(msg).show();
-            } else {
-                $area.empty().hide();
-            }
-        } catch (e) {
-            console.error('Akt Sverka summary render error:', e);
-        }
-    },
     "onload": function(report) {
 
         // ── Existing back button ──────────────────────────────────────

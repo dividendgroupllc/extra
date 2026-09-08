@@ -21,11 +21,6 @@ def format_qty(value):
     return round(flt(value), 2) if value is not None else None
 
 
-def voucher_type_matches(row, base_voucher_type):
-    voucher_type = (row or {}).get("voucher_type") or ""
-    return voucher_type == base_voucher_type or voucher_type.startswith(f"{base_voucher_type} ")
-
-
 def get_voucher_doctype(voucher_type):
     if not voucher_type or voucher_type in {"Boshlang'ich qoldiq", "Total"}:
         return ""
@@ -109,6 +104,13 @@ def get_columns():
     ]
 
 
+INVOICE_VOUCHER_TYPES = ("Sales Invoice", "Purchase Invoice")
+RETURN_SUFFIX = " (Возврат)"
+INVOICE_PAYMENT_SUFFIX = " (Оплата)"        # chek ichidagi to'lov (POS), write-off
+INVOICE_REFUND_SUFFIX = " (Возврат денег)"  # qaytim / naqd qaytarish
+INVOICE_ADJUSTMENT_SUFFIX = " (Корректировка)"  # tovar summasi va GL farqi (soliq, chegirma, yaxlitlash)
+
+
 def get_data(filters):
     from_date = filters.get("from_date")
     to_date = filters.get("to_date")
@@ -145,7 +147,8 @@ def get_data(filters):
         "currency": party_currency,
         "credit": opening_credit,
         "debit": opening_debit,
-        "balance": format_balance(opening_balance)
+        "balance": format_balance(opening_balance),
+        "row_kind": "opening",
     })
 
     # GL Entry'larni olish
@@ -177,8 +180,15 @@ def get_data(filters):
     pe_vouchers = set()
     je_vouchers = set()
 
+    # Bitta invoice bir nechta GL qator yozishi mumkin: tovar uchun asosiy qator,
+    # POS chekida kassada olingan pul (kredit), qaytim / naqd qaytarish (debet),
+    # write-off. Hammasi bitta joyda ko'rilishi uchun voucher bo'yicha guruhlaymiz.
+    invoice_gl_rows = {}
+
     for gl in gl_entries:
         vt = gl.voucher_type
+        if vt in INVOICE_VOUCHER_TYPES:
+            invoice_gl_rows.setdefault((vt, gl.voucher_no), []).append(gl)
         if vt == "Purchase Invoice":
             pi_vouchers.add(gl.voucher_no)
         elif vt == "Sales Invoice":
@@ -210,143 +220,31 @@ def get_data(filters):
         je_accounts_map = prefetch_journal_entry_accounts(je_vouchers, party_type, party)
 
     balance = opening_balance
-    seen_pi_vouchers = set()
-    seen_si_vouchers = set()
+    seen_invoices = set()
     seen_je_vouchers = set()
 
     for gl in gl_entries:
         voucher_type = gl.voucher_type
         voucher_no = gl.voucher_no
 
-        if voucher_type == "Purchase Invoice":
-            is_return = pi_return_map.get(voucher_no, 0)
-            items = pi_items_map.get(voucher_no, [])
-            if items:
-                if voucher_no in seen_pi_vouchers:
-                    continue
-                seen_pi_vouchers.add(voucher_no)
-                items = convert_items_to_party_currency(items, gl, party_currency)
-                total_amount = sum(flt(item.get('amount', 0)) for item in items)
-                for idx, item in enumerate(items):
-                    is_last = (idx == len(items) - 1)
-                    item_amount = flt(item.get('amount', 0))
-                    if is_last:
-                        balance += total_amount
-                    if is_return:
-                        data.append({
-                            "posting_date": gl.posting_date,
-                            "voucher_type": voucher_type + " (Возврат)",
-                            "voucher_no": voucher_no,
-                            "item_name": item.get('item_name', ''),
-                            "qty": format_qty(abs(flt(item.get('qty')))),
-                            "rate": item.get('rate'),
-                            "currency": party_currency,
-                            "credit": 0,
-                            "debit": abs(item_amount),
-                            "balance": format_balance(balance) if is_last else None,
-                        })
-                    else:
-                        data.append({
-                            "posting_date": gl.posting_date,
-                            "voucher_type": voucher_type,
-                            "voucher_no": voucher_no,
-                            "item_name": item.get('item_name', ''),
-                            "qty": format_qty(item.get('qty')),
-                            "rate": item.get('rate'),
-                            "currency": party_currency,
-                            "credit": item_amount,
-                            "debit": 0,
-                            "balance": format_balance(balance) if is_last else None,
-                        })
-            else:
-                if is_return:
-                    balance -= flt(gl.debit)
-                    data.append({
-                        "posting_date": gl.posting_date,
-                        "voucher_type": voucher_type + " (Возврат)",
-                        "voucher_no": voucher_no,
-                        "item_name": "",
-                        "qty": None, "rate": None,
-                        "currency": gl.currency,
-                        "credit": 0, "debit": gl.debit,
-                        "balance": format_balance(balance),
-                    })
-                else:
-                    balance += flt(gl.credit)
-                    data.append({
-                        "posting_date": gl.posting_date,
-                        "voucher_type": voucher_type,
-                        "voucher_no": voucher_no,
-                        "item_name": "",
-                        "qty": None, "rate": None,
-                        "currency": gl.currency,
-                        "credit": gl.credit, "debit": 0,
-                        "balance": format_balance(balance),
-                    })
+        if voucher_type in INVOICE_VOUCHER_TYPES:
+            key = (voucher_type, voucher_no)
+            if key in seen_invoices:
+                # Bu invoice'ning barcha GL qatorlari birinchi uchraganda chiqarilgan
+                continue
+            seen_invoices.add(key)
 
-        elif voucher_type == "Sales Invoice":
-            is_return = si_return_map.get(voucher_no, 0)
-            items = si_items_map.get(voucher_no, [])
-            if items:
-                if voucher_no in seen_si_vouchers:
-                    continue
-                seen_si_vouchers.add(voucher_no)
-                items = convert_items_to_party_currency(items, gl, party_currency)
-                total_amount = sum(flt(item.get('amount', 0)) for item in items)
-                for idx, item in enumerate(items):
-                    is_last = (idx == len(items) - 1)
-                    item_amount = flt(item.get('amount', 0))
-                    if is_last:
-                        balance -= total_amount
-                    if is_return:
-                        data.append({
-                            "posting_date": gl.posting_date,
-                            "voucher_type": voucher_type + " (Возврат)",
-                            "voucher_no": voucher_no,
-                            "item_name": item.get('item_name', ''),
-                            "qty": format_qty(abs(flt(item.get('qty')))),
-                            "rate": item.get('rate'),
-                            "currency": party_currency,
-                            "credit": abs(item_amount), "debit": 0,
-                            "balance": format_balance(balance) if is_last else None,
-                        })
-                    else:
-                        data.append({
-                            "posting_date": gl.posting_date,
-                            "voucher_type": voucher_type,
-                            "voucher_no": voucher_no,
-                            "item_name": item.get('item_name', ''),
-                            "qty": format_qty(item.get('qty')),
-                            "rate": item.get('rate'),
-                            "currency": party_currency,
-                            "credit": 0, "debit": item_amount,
-                            "balance": format_balance(balance) if is_last else None,
-                        })
+            if voucher_type == "Purchase Invoice":
+                items = pi_items_map.get(voucher_no, [])
+                is_return = pi_return_map.get(voucher_no, 0)
             else:
-                if is_return:
-                    balance += flt(gl.credit)
-                    data.append({
-                        "posting_date": gl.posting_date,
-                        "voucher_type": voucher_type + " (Возврат)",
-                        "voucher_no": voucher_no,
-                        "item_name": "",
-                        "qty": None, "rate": None,
-                        "currency": gl.currency,
-                        "credit": gl.credit, "debit": 0,
-                        "balance": format_balance(balance),
-                    })
-                else:
-                    balance -= flt(gl.debit)
-                    data.append({
-                        "posting_date": gl.posting_date,
-                        "voucher_type": voucher_type,
-                        "voucher_no": voucher_no,
-                        "item_name": "",
-                        "qty": None, "rate": None,
-                        "currency": gl.currency,
-                        "credit": 0, "debit": gl.debit,
-                        "balance": format_balance(balance),
-                    })
+                items = si_items_map.get(voucher_no, [])
+                is_return = si_return_map.get(voucher_no, 0)
+
+            balance = append_invoice_rows(
+                data, voucher_type, voucher_no, invoice_gl_rows[key],
+                items, is_return, party_currency, balance,
+            )
 
         elif voucher_type == "Payment Entry":
             pe_info = pe_info_map.get(voucher_no, {'description': '', 'account': ''})
@@ -360,6 +258,7 @@ def get_data(filters):
                 "currency": gl.currency,
                 "credit": gl.credit, "debit": gl.debit,
                 "balance": format_balance(balance),
+                "row_kind": "money",
             })
 
         elif voucher_type == "Journal Entry":
@@ -384,6 +283,7 @@ def get_data(filters):
                         "credit": acc.get('credit', 0),
                         "debit": acc.get('debit', 0),
                         "balance": format_balance(balance) if is_last else None,
+                        "row_kind": "accrual",
                     })
             else:
                 balance += flt(gl.credit) - flt(gl.debit)
@@ -396,6 +296,7 @@ def get_data(filters):
                     "currency": gl.currency,
                     "credit": gl.credit, "debit": gl.debit,
                     "balance": format_balance(balance),
+                    "row_kind": "accrual",
                 })
 
         else:
@@ -409,10 +310,126 @@ def get_data(filters):
                 "currency": gl.currency,
                 "credit": gl.credit, "debit": gl.debit,
                 "balance": format_balance(balance),
+                "row_kind": "other",
             })
 
     finalize_data(data, to_date, party_currency, balance)
     return data
+
+
+def split_invoice_gl_rows(voucher_type, gl_rows, is_return):
+    """Invoice GL qatorlarini asosiy (tovar) qator va qolgan (pul) qatorlarga ajratadi.
+
+    Asosiy qator: sotuvda debet (qaytarishda kredit), xaridda kredit (qaytarishda debet)
+    tomonidagi eng katta summa. Qolganlari — chek ichidagi to'lov, qaytim, write-off.
+    """
+    is_sale = voucher_type == "Sales Invoice"
+    main_is_debit = (is_sale and not is_return) or (not is_sale and is_return)
+    side = "debit" if main_is_debit else "credit"
+    candidates = [row for row in gl_rows if flt(row.get(side)) > 0]
+    main = max(candidates, key=lambda row: flt(row.get(side))) if candidates else gl_rows[0]
+    others = [row for row in gl_rows if row is not main]
+    return main, others
+
+
+def append_invoice_rows(data, voucher_type, voucher_no, gl_rows, items, is_return, party_currency, balance):
+    """Bitta invoice uchun barcha qatorlarni chiqaradi, yangi balansni qaytaradi.
+
+    Balans konventsiyasi: + kredit, - debet (kontragent nuqtai nazaridan).
+    1) Tovar qatorlari (item bo'yicha), summasi invoice item'laridan.
+    2) Tovar summasi bilan GL asosiy qatori farq qilsa (soliq, chegirma, kurs
+       yaxlitlashi) — "(Корректировка)" qatori, shunda hisobot GL bilan teng chiqadi.
+    3) Invoice'ning boshqa GL qatorlari — POS chekidagi to'lov, qaytim, write-off.
+       Ilgari bu qatorlar tashlab yuborilar edi va POS mijozlarining qarzi noto'g'ri chiqardi.
+    """
+    is_sale = voucher_type == "Sales Invoice"
+    main, others = split_invoice_gl_rows(voucher_type, gl_rows, is_return)
+    posting_date = main.posting_date
+    label = voucher_type + (RETURN_SUFFIX if is_return else "")
+    main_signed = flt(main.credit) - flt(main.debit)
+
+    if items:
+        items = convert_items_to_party_currency(items, main, party_currency)
+        total_amount = sum(flt(item.get("amount", 0)) for item in items)
+        item_signed = -total_amount if is_sale else total_amount
+        for idx, item in enumerate(items):
+            is_last = (idx == len(items) - 1)
+            item_amount = flt(item.get("amount", 0))
+            if is_last:
+                balance += item_signed
+            if is_sale:
+                credit, debit = (abs(item_amount), 0) if is_return else (0, item_amount)
+            else:
+                credit, debit = (0, abs(item_amount)) if is_return else (item_amount, 0)
+            qty = item.get("qty")
+            data.append({
+                "posting_date": posting_date,
+                "voucher_type": label,
+                "voucher_no": voucher_no,
+                "item_name": item.get("item_name", ""),
+                "qty": format_qty(abs(flt(qty))) if is_return else format_qty(qty),
+                "rate": item.get("rate"),
+                "currency": party_currency,
+                "credit": credit,
+                "debit": debit,
+                "balance": format_balance(balance) if is_last else None,
+                "row_kind": "goods",
+            })
+
+        diff = flt(main_signed - item_signed, 2)
+        if abs(diff) >= 0.01:
+            balance += diff
+            data.append({
+                "posting_date": posting_date,
+                "voucher_type": voucher_type + INVOICE_ADJUSTMENT_SUFFIX,
+                "voucher_no": voucher_no,
+                "item_name": "",
+                "qty": None, "rate": None,
+                "currency": main.currency,
+                "credit": diff if diff > 0 else 0,
+                "debit": -diff if diff < 0 else 0,
+                "balance": format_balance(balance),
+                "row_kind": "goods",
+            })
+    else:
+        balance += main_signed
+        data.append({
+            "posting_date": posting_date,
+            "voucher_type": label,
+            "voucher_no": voucher_no,
+            "item_name": "",
+            "qty": None, "rate": None,
+            "currency": main.currency,
+            "credit": flt(main.credit, 2), "debit": flt(main.debit, 2),
+            "balance": format_balance(balance),
+            "row_kind": "goods",
+        })
+
+    for row in others:
+        credit, debit = flt(row.credit), flt(row.debit)
+        if not credit and not debit:
+            continue
+        balance += credit - debit
+        # GL'da hisob valyutasidagi summa yaxlitlanmagan bo'lishi mumkin (UZS chek -> USD);
+        # ko'rsatish uchun 2 xonaga yaxlitlaymiz, balans esa aniq qiymat bilan yuradi.
+        credit, debit = flt(credit, 2), flt(debit, 2)
+        if is_sale:
+            suffix = INVOICE_PAYMENT_SUFFIX if credit >= debit else INVOICE_REFUND_SUFFIX
+        else:
+            suffix = INVOICE_PAYMENT_SUFFIX if debit >= credit else INVOICE_REFUND_SUFFIX
+        data.append({
+            "posting_date": row.posting_date,
+            "voucher_type": voucher_type + suffix,
+            "voucher_no": voucher_no,
+            "item_name": "",
+            "qty": None, "rate": None,
+            "currency": row.currency,
+            "credit": credit, "debit": debit,
+            "balance": format_balance(balance),
+            "row_kind": "money",
+        })
+
+    return balance
 
 
 def calculate_opening_balance_optimized(party_type, party, party_currency, from_date):
@@ -487,6 +504,7 @@ def finalize_data(data, to_date, party_currency, balance):
             "credit": total_credit,
             "debit": total_debit,
             "balance": format_balance(balance),
+            "row_kind": "total",
         })
 
     for row in data:
@@ -603,54 +621,52 @@ def prefetch_journal_entry_accounts(voucher_nos, party_type, party):
     return result
 
 
-def get_summary_html(data, filters):
-    if not data or len(data) <= 1:
-        return ""
+def build_summary(data):
+    """Summary raqamlari: qatorlar `row_kind` bo'yicha guruhlanadi.
 
+    goods   — invoice tovar qatorlari (+ soliq/chegirma korrektirovkasi)
+    money   — Payment Entry va chek ichidagi to'lov / qaytim qatorlari
+    accrual — Journal Entry qatorlari
+    """
     opening_row = data[0] if data else {}
     opening_balance = flt(opening_row.get('balance_credit', 0)) - flt(opening_row.get('balance_debit', 0))
 
-    closing_balance = 0
-    total_row = [r for r in data if r.get('voucher_type') == 'Total']
-    if total_row:
-        tr = total_row[0]
+    closing_balance = 0.0
+    total_rows = [r for r in data if r.get('voucher_type') == 'Total']
+    if total_rows:
+        tr = total_rows[0]
         closing_balance = flt(tr.get('balance_credit', 0)) - flt(tr.get('balance_debit', 0))
     elif data:
         lr = data[-1]
         closing_balance = flt(lr.get('balance_credit', 0)) - flt(lr.get('balance_debit', 0))
 
-    opening_credit = opening_balance if opening_balance > 0 else 0
-    opening_debit = abs(opening_balance) if opening_balance < 0 else 0
+    def _sum(kind, field):
+        return sum(flt(r.get(field, 0)) for r in data if r.get('row_kind') == kind)
 
-    goods_credit = sum(
-        flt(r.get('credit', 0)) for r in data
-        if voucher_type_matches(r, 'Purchase Invoice') or voucher_type_matches(r, 'Sales Invoice')
-    )
-    goods_debit = sum(
-        flt(r.get('debit', 0)) for r in data
-        if voucher_type_matches(r, 'Purchase Invoice') or voucher_type_matches(r, 'Sales Invoice')
-    )
+    return {
+        "opening_credit":  opening_balance if opening_balance > 0 else 0.0,
+        "opening_debit":   abs(opening_balance) if opening_balance < 0 else 0.0,
+        "goods_credit":    _sum("goods", "credit"),
+        "goods_debit":     _sum("goods", "debit"),
+        "money_credit":    _sum("money", "credit"),
+        "money_debit":     _sum("money", "debit"),
+        "accruals_credit": _sum("accrual", "credit"),
+        "accruals_debit":  _sum("accrual", "debit"),
+        "closing_credit":  closing_balance if closing_balance > 0 else 0.0,
+        "closing_debit":   abs(closing_balance) if closing_balance < 0 else 0.0,
+    }
 
-    money_credit = sum(
-        flt(r.get('credit', 0)) for r in data
-        if voucher_type_matches(r, 'Payment Entry')
-    )
-    money_debit = sum(
-        flt(r.get('debit', 0)) for r in data
-        if voucher_type_matches(r, 'Payment Entry')
-    )
 
-    accruals_credit = sum(
-        flt(r.get('credit', 0)) for r in data
-        if voucher_type_matches(r, 'Journal Entry')
-    )
-    accruals_debit = sum(
-        flt(r.get('debit', 0)) for r in data
-        if voucher_type_matches(r, 'Journal Entry')
-    )
+def get_summary_html(data, filters):
+    if not data or len(data) <= 1:
+        return ""
 
-    closing_credit = closing_balance if closing_balance > 0 else 0
-    closing_debit = abs(closing_balance) if closing_balance < 0 else 0
+    s = build_summary(data)
+    opening_credit, opening_debit = s["opening_credit"], s["opening_debit"]
+    goods_credit, goods_debit = s["goods_credit"], s["goods_debit"]
+    money_credit, money_debit = s["money_credit"], s["money_debit"]
+    accruals_credit, accruals_debit = s["accruals_credit"], s["accruals_debit"]
+    closing_credit, closing_debit = s["closing_credit"], s["closing_debit"]
 
     html = f"""
     <div style="margin-top: 20px; padding: 15px; background-color: #f9f9f9; border-radius: 5px;">
@@ -777,46 +793,8 @@ def _fmt_num(value):
 
 
 def _build_pdf_summary(data):
-    """Extract summary numbers from processed data rows."""
-    opening_row = data[0] if data else {}
-    opening_balance = flt(opening_row.get("balance_credit", 0)) - flt(
-        opening_row.get("balance_debit", 0)
-    )
-
-    closing_balance = 0.0
-    total_rows = [r for r in data if r.get("voucher_type") == "Total"]
-    if total_rows:
-        tr = total_rows[0]
-        closing_balance = flt(tr.get("balance_credit", 0)) - flt(
-            tr.get("balance_debit", 0)
-        )
-    elif data:
-        lr = data[-1]
-        closing_balance = flt(lr.get("balance_credit", 0)) - flt(
-            lr.get("balance_debit", 0)
-        )
-
-    def _c(vt_base):
-        return sum(flt(r.get("credit", 0)) for r in data if voucher_type_matches(r, vt_base))
-
-    def _d(vt_base):
-        return sum(flt(r.get("debit", 0)) for r in data if voucher_type_matches(r, vt_base))
-
-    goods_credit = _c("Purchase Invoice") + _c("Sales Invoice")
-    goods_debit  = _d("Purchase Invoice") + _d("Sales Invoice")
-
-    return {
-        "opening_credit":   opening_balance if opening_balance > 0 else 0.0,
-        "opening_debit":    abs(opening_balance) if opening_balance < 0 else 0.0,
-        "goods_credit":     goods_credit,
-        "goods_debit":      goods_debit,
-        "money_credit":     _c("Payment Entry"),
-        "money_debit":      _d("Payment Entry"),
-        "accruals_credit":  _c("Journal Entry"),
-        "accruals_debit":   _d("Journal Entry"),
-        "closing_credit":   closing_balance if closing_balance > 0 else 0.0,
-        "closing_debit":    abs(closing_balance) if closing_balance < 0 else 0.0,
-    }
+    """Extract summary numbers from processed data rows (same logic as on-screen summary)."""
+    return build_summary(data)
 
 
 def _render_pdf_html(data, filters, company, summary):
