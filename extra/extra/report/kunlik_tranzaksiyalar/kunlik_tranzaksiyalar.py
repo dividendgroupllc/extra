@@ -725,7 +725,58 @@ def fx_rate(conversion_rate):
     rate = flt(conversion_rate)
     if not rate or rate >= 1:
         return 0.0
-    return flt(1 / rate, 2)
+    return snap_rate(1 / rate)
+
+
+def get_known_rates():
+    """Currency Exchange'даги ҳақиқий курслар рўйхати (1 доллар = ... сўм)."""
+    rates = frappe.flags.get("extra_known_fx_rates")
+    if rates is not None:
+        return rates
+
+    direct, inverse = set(), set()
+    for row in frappe.get_all(
+        "Currency Exchange", fields=["from_currency", "to_currency", "exchange_rate"]
+    ):
+        value = flt(row.exchange_rate)
+        if not value:
+            continue
+        # 1 доллар = ... сўм кўринишидаги ёзув — курс шундай киритилган,
+        # шунинг учун у "ҳақиқий" ҳисобланади.
+        if row.to_currency == SOM and row.from_currency != SOM:
+            direct.add(flt(value, 2))
+        elif row.from_currency == SOM and row.to_currency != SOM:
+            inverse.add(flt(1 / value, 2))
+
+    # Тескари ёзув (UZS -> USD) ҳам 9 хонагача яхлитланган: ундан чиққан
+    # 11899,95 — 11900 нинг ўзи. Шунинг учун тўғри ёзувга яқини ташланади.
+    rates = set(direct)
+    for value in inverse:
+        if not any(abs(value - known) <= max(1.0, known * 0.0001) for known in direct):
+            rates.add(value)
+
+    rates = sorted(rates)
+    frappe.flags.extra_known_fx_rates = rates
+    return rates
+
+
+def snap_rate(rate):
+    """Ҳисобланган курсни Currency Exchange'даги курсга «ёпиштириш».
+
+    Ҳужжатда курс тескари кўринишда (сўм -> доллар) ва атиги 9 хонагача
+    сақланади: 1/11900 = 0,000084034. Уни қайта айлантирсак 11899,95 чиқади
+    — кассир киритган 11900 эмас. Шунинг учун натижа жадвалдаги ҳақиқий
+    курсга жуда яқин бўлса (0,01% ичида), ўша курс кўрсатилади.
+    """
+    rate = flt(rate, 2)
+    if not rate:
+        return 0.0
+    tolerance = max(1.0, rate * 0.0001)
+    known_rates = get_known_rates()
+    if not known_rates:
+        return rate
+    closest = min(known_rates, key=lambda known: abs(known - rate))
+    return closest if abs(closest - rate) <= tolerance else rate
 
 
 def fmt_time(value):
