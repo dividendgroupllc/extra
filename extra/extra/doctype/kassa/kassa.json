@@ -21,6 +21,12 @@
   "section_break_transfer",
   "column_break_transfer",
   "balance_to",
+  "section_break_conversion",
+  "exchange_rate",
+  "column_break_conversion",
+  "debit_amount",
+  "credit_amount",
+  "manual_credit_amount",
   "section_break_party",
   "party_type",
   "party",
@@ -60,7 +66,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Тип операции",
-   "options": "\nПриход\nРасход\nПеремещения",
+   "options": "\nПриход\nРасход\nПеремещения\nКонвертация",
    "reqd": 1
   },
   {
@@ -84,7 +90,7 @@
    "read_only": 1
   },
   {
-   "depends_on": "eval:in_list(['Приход', 'Расход'], doc.transaction_type) && doc.mode_of_payment",
+   "depends_on": "eval:in_list(['Приход', 'Расход', 'Конвертация'], doc.transaction_type) && doc.mode_of_payment",
    "fieldname": "cash_account_currency",
    "fieldtype": "Data",
    "label": "Валюта кассы",
@@ -99,14 +105,15 @@
    "options": "Company"
   },
   {
-   "depends_on": "eval:doc.transaction_type === 'Перемещения'",
+   "depends_on": "eval:in_list(['Перемещения', 'Конвертация'], doc.transaction_type)",
    "fieldname": "mode_of_payment_to",
    "fieldtype": "Link",
    "label": "Способ оплаты (куда)",
-   "options": "Mode of Payment"
+   "options": "Mode of Payment",
+   "mandatory_depends_on": "eval:in_list(['Перемещения', 'Конвертация'], doc.transaction_type)"
   },
   {
-   "depends_on": "eval:doc.transaction_type === 'Перемещения' && doc.mode_of_payment_to",
+   "depends_on": "eval:in_list(['Перемещения', 'Конвертация'], doc.transaction_type) && doc.mode_of_payment_to",
    "fieldname": "section_break_transfer",
    "fieldtype": "Section Break",
    "label": "Остаток (куда)"
@@ -139,9 +146,50 @@
    "read_only": 1
   },
   {
+   "depends_on": "eval:doc.transaction_type === 'Конвертация'",
+   "fieldname": "section_break_conversion",
+   "fieldtype": "Section Break",
+   "label": "Конвертация"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.transaction_type === 'Конвертация'",
+   "fieldname": "exchange_rate",
+   "fieldtype": "Float",
+   "label": "Курс (1 USD = ? UZS)",
+   "precision": "9"
+  },
+  {
+   "depends_on": "eval:doc.transaction_type === 'Конвертация'",
+   "fieldname": "column_break_conversion",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "eval:doc.transaction_type === 'Конвертация'",
+   "fieldname": "debit_amount",
+   "fieldtype": "Currency",
+   "label": "Сумма расхода",
+   "options": "cash_account_currency"
+  },
+  {
+   "depends_on": "eval:doc.transaction_type === 'Конвертация'",
+   "fieldname": "credit_amount",
+   "fieldtype": "Currency",
+   "label": "Сумма прихода",
+   "options": "cash_account_to_currency"
+  },
+  {
+   "default": "0",
+   "fieldname": "manual_credit_amount",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "label": "Manual Credit Amount"
+  },
+  {
    "fieldname": "section_break_party",
    "fieldtype": "Section Break",
-   "label": "Контрагент"
+   "label": "Контрагент",
+   "depends_on": "eval:in_list(['Приход', 'Расход'], doc.transaction_type)"
   },
   {
    "depends_on": "eval:in_list(['Приход', 'Расход'], doc.transaction_type)",
@@ -191,7 +239,8 @@
   {
    "fieldname": "section_break_amount",
    "fieldtype": "Section Break",
-   "label": "Сумма"
+   "label": "Сумма",
+   "depends_on": "eval:doc.transaction_type !== 'Конвертация'"
   },
   {
    "depends_on": "eval:doc.transaction_type && doc.mode_of_payment",
@@ -203,7 +252,8 @@
   },
   {
    "fieldname": "column_break_3",
-   "fieldtype": "Column Break"
+   "fieldtype": "Column Break",
+   "depends_on": "eval:doc.transaction_type !== 'Конвертация'"
   },
   {
    "fieldname": "amount",
@@ -211,7 +261,8 @@
    "in_list_view": 1,
    "label": "Сумма",
    "options": "cash_account_currency",
-   "reqd": 1
+   "depends_on": "eval:doc.transaction_type !== 'Конвертация'",
+   "mandatory_depends_on": "eval:doc.transaction_type !== 'Конвертация'"
   },
   {
    "fieldname": "section_break_details",
@@ -255,7 +306,7 @@
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-09-04 20:12:33.967358",
+ "modified": "2026-09-17 20:50:00.000000",
  "modified_by": "Administrator",
  "module": "Extra",
  "name": "Kassa",

@@ -7,6 +7,9 @@ from frappe.model.document import Document
 from frappe.utils import flt
 
 
+CONVERSION_CURRENCIES = ("UZS", "USD")
+
+
 class Kassa(Document):
     def validate(self):
         self.set_default_company()
@@ -17,6 +20,7 @@ class Kassa(Document):
         self.validate_party()
         self.validate_transaction_rules()
         self.validate_transfer()
+        self.validate_conversion()
         self.validate_amount()
         self.validate_currency()
 
@@ -31,6 +35,8 @@ class Kassa(Document):
                 self.create_expense_journal_entry()
         elif self.transaction_type == "Перемещения":
             self.create_transfer_payment_entry()
+        elif self.transaction_type == "Конвертация":
+            self.create_conversion_payment_entry()
 
     def on_cancel(self):
         """Cancel bo'lganda bog'langan Payment Entry yoki Journal Entry ni cancel qilish"""
@@ -293,6 +299,73 @@ class Kassa(Document):
             frappe.utils.get_link_to_form("Payment Entry", pe.name)
         ))
 
+    def create_conversion_payment_entry(self):
+        """Create an Internal Transfer Payment Entry for a UZS/USD conversion."""
+        from_currency = frappe.get_cached_value(
+            "Account", self.cash_account, "account_currency"
+        )
+        to_currency = frappe.get_cached_value(
+            "Account", self.cash_account_to, "account_currency"
+        )
+
+        pe = frappe.new_doc("Payment Entry")
+        pe.payment_type = "Internal Transfer"
+        pe.posting_date = self.date
+        pe.company = self.company
+        pe.mode_of_payment = self.mode_of_payment
+        pe.paid_from = self.cash_account
+        pe.paid_to = self.cash_account_to
+        pe.paid_amount = flt(self.debit_amount)
+        pe.received_amount = flt(self.credit_amount)
+        pe.source_exchange_rate = self.get_company_exchange_rate(from_currency)
+        pe.target_exchange_rate = self.get_company_exchange_rate(to_currency)
+        pe.reference_no = self.name
+        pe.reference_date = self.date
+        pe.remarks = self.remarks or f"Conversion from {self.name}"
+
+        pe.flags.ignore_permissions = True
+        pe.insert()
+        pe.submit()
+
+        self.linked_doctype = "Payment Entry"
+        self.linked_entry = pe.name
+        frappe.db.set_value(
+            "Kassa", self.name, "linked_doctype", "Payment Entry", update_modified=False
+        )
+        frappe.db.set_value(
+            "Kassa", self.name, "linked_entry", pe.name, update_modified=False
+        )
+
+        frappe.msgprint(_("Payment Entry {0} для конвертации создан").format(
+            frappe.utils.get_link_to_form("Payment Entry", pe.name)
+        ))
+
+    def get_company_exchange_rate(self, currency):
+        """Return the account-currency to company-currency rate for Payment Entry."""
+        company_currency = frappe.get_cached_value(
+            "Company", self.company, "default_currency"
+        )
+        if not currency or currency == company_currency:
+            return 1
+
+        if (
+            self.transaction_type == "Конвертация"
+            and {currency, company_currency} == set(CONVERSION_CURRENCIES)
+            and flt(self.exchange_rate) > 0
+        ):
+            if currency == "USD":
+                return flt(self.exchange_rate)
+            return flt(1 / flt(self.exchange_rate), 9)
+
+        rate = get_exchange_rate(currency, company_currency, self.date)
+        if not rate or flt(rate) <= 0:
+            frappe.throw(
+                _("Не найден курс {0} к валюте компании {1}").format(
+                    currency, company_currency
+                )
+            )
+        return flt(rate)
+
     def cancel_linked_entries(self):
         """Bog'langan Payment Entry va Journal Entrylarni cancel qilish"""
         # Cancel Payment Entries
@@ -391,8 +464,63 @@ class Kassa(Document):
             if self.mode_of_payment == self.mode_of_payment_to:
                 frappe.throw(_("Способ оплаты источника и назначения должны отличаться"))
 
+            from_currency = frappe.get_cached_value(
+                "Account", self.cash_account, "account_currency"
+            ) if self.cash_account else None
+            to_currency = frappe.get_cached_value(
+                "Account", self.cash_account_to, "account_currency"
+            ) if self.cash_account_to else None
+
+            if not from_currency or not to_currency:
+                frappe.throw(_("Не удалось определить валюту счетов для перемещения"))
+
+            if from_currency != to_currency:
+                frappe.throw(_("Для перемещения способы оплаты должны иметь одинаковую валюту"))
+
+    def validate_conversion(self):
+        """Validate a conversion using the currencies of the linked cash accounts."""
+        if self.transaction_type != "Конвертация":
+            return
+
+        if not self.mode_of_payment_to:
+            frappe.throw(_("Пожалуйста, выберите способ оплаты (куда)"))
+
+        if self.mode_of_payment == self.mode_of_payment_to:
+            frappe.throw(_("Способ оплаты источника и назначения должны отличаться"))
+
+        if not self.exchange_rate or flt(self.exchange_rate) <= 0:
+            frappe.throw(_("Пожалуйста, укажите курс обмена"))
+
+        if flt(self.debit_amount) <= 0:
+            frappe.throw(_("Пожалуйста, укажите сумму расхода"))
+
+        if flt(self.credit_amount) <= 0:
+            frappe.throw(_("Пожалуйста, укажите сумму прихода"))
+
+        from_currency = frappe.get_cached_value(
+            "Account", self.cash_account, "account_currency"
+        ) if self.cash_account else None
+        to_currency = frappe.get_cached_value(
+            "Account", self.cash_account_to, "account_currency"
+        ) if self.cash_account_to else None
+
+        if not from_currency or not to_currency:
+            frappe.throw(_("Не удалось определить валюту счетов для конвертации"))
+
+        if (
+            from_currency not in CONVERSION_CURRENCIES
+            or to_currency not in CONVERSION_CURRENCIES
+        ):
+            frappe.throw(_("Для конвертации выберите счета в UZS или USD"))
+
+        if from_currency == to_currency:
+            frappe.throw(_("Для конвертации способы оплаты должны иметь разные валюты"))
+
     def validate_amount(self):
         """Summa validatsiyasi"""
+        if self.transaction_type == "Конвертация":
+            return
+
         if flt(self.amount) <= 0:
             frappe.throw(_("Сумма должна быть больше нуля"))
 
@@ -457,6 +585,119 @@ def get_cash_account_with_currency(mode_of_payment, company):
         return {"account": account, "currency": currency}
 
     return {"account": None, "currency": None}
+
+
+def get_cash_mode_of_payment_currencies(company, currencies=None):
+    """Return enabled payment modes with their configured cash-account currency."""
+    params = {"company": company}
+    currency_condition = ""
+    if currencies:
+        currency_condition = "AND acc.account_currency IN %(currencies)s"
+        params["currencies"] = tuple(currencies)
+
+    return frappe.db.sql(
+        """
+        SELECT mpa.parent AS mode_of_payment, acc.account_currency AS currency
+        FROM `tabMode of Payment Account` mpa
+        INNER JOIN `tabAccount` acc ON acc.name = mpa.default_account
+        INNER JOIN `tabMode of Payment` mop ON mop.name = mpa.parent
+        WHERE mpa.company = %(company)s
+            AND mop.enabled = 1
+            {currency_condition}
+        ORDER BY mpa.parent
+        """.format(currency_condition=currency_condition),
+        params,
+        as_dict=True,
+    )
+
+
+def get_source_mode_currency(company, source_mode_of_payment):
+    if not source_mode_of_payment:
+        return None
+
+    source_account = get_cash_account(source_mode_of_payment, company)
+    if not source_account:
+        return None
+
+    return frappe.get_cached_value("Account", source_account, "account_currency")
+
+
+def get_conversion_mode_of_payments(company, source_mode_of_payment=None):
+    """Return UZS/USD modes, optionally restricted to the opposite currency."""
+    rows = get_cash_mode_of_payment_currencies(company, CONVERSION_CURRENCIES)
+    source_currency = get_source_mode_currency(company, source_mode_of_payment)
+
+    return [
+        row
+        for row in rows
+        if not source_mode_of_payment
+        or (
+            row.mode_of_payment != source_mode_of_payment
+            and source_currency
+            and row.currency != source_currency
+        )
+    ]
+
+
+def get_transfer_mode_of_payments(company, source_mode_of_payment=None):
+    """Return modes in the same account currency as the selected source mode."""
+    rows = get_cash_mode_of_payment_currencies(company)
+    source_currency = get_source_mode_currency(company, source_mode_of_payment)
+
+    return [
+        row
+        for row in rows
+        if not source_mode_of_payment
+        or (
+            row.mode_of_payment != source_mode_of_payment
+            and source_currency
+            and row.currency == source_currency
+        )
+    ]
+
+
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def conversion_mode_of_payment_query(doctype, txt, searchfield, start, page_len, filters):
+    filters = filters or {}
+    company = filters.get("company")
+    if not company:
+        return []
+
+    modes = get_conversion_mode_of_payments(
+        company, filters.get("source_mode_of_payment")
+    )
+    return _format_mode_of_payment_query_result(modes, txt, start, page_len)
+
+
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def transfer_mode_of_payment_query(doctype, txt, searchfield, start, page_len, filters):
+    filters = filters or {}
+    company = filters.get("company")
+    if not company:
+        return []
+
+    modes = get_transfer_mode_of_payments(
+        company, filters.get("source_mode_of_payment")
+    )
+    return _format_mode_of_payment_query_result(modes, txt, start, page_len)
+
+
+def _format_mode_of_payment_query_result(modes, txt, start, page_len):
+    if txt:
+        txt_lower = txt.lower()
+        modes = [
+            row for row in modes
+            if txt_lower in (row.mode_of_payment or "").lower()
+        ]
+
+    start = int(start or 0)
+    page_len = int(page_len or 20)
+    return [
+        [row.mode_of_payment, row.currency]
+        for row in modes[start:start + page_len]
+    ]
 
 
 @frappe.whitelist()
@@ -545,3 +786,43 @@ def get_expense_accounts(doctype, txt, searchfield, start, page_len, filters):
         "page_len": page_len
     })
 
+
+@frappe.whitelist()
+def get_exchange_rate(from_currency, to_currency, date=None):
+    """Return the latest direct or reverse Currency Exchange rate for the date."""
+    if not from_currency or not to_currency:
+        return 0
+
+    if from_currency == to_currency:
+        return 1
+
+    if not date:
+        date = frappe.utils.today()
+
+    exchange_rate = frappe.db.get_value(
+        "Currency Exchange",
+        {
+            "from_currency": from_currency,
+            "to_currency": to_currency,
+            "date": ("<=", date),
+        },
+        "exchange_rate",
+        order_by="date desc",
+    )
+    if exchange_rate:
+        return flt(exchange_rate)
+
+    reverse_rate = frappe.db.get_value(
+        "Currency Exchange",
+        {
+            "from_currency": to_currency,
+            "to_currency": from_currency,
+            "date": ("<=", date),
+        },
+        "exchange_rate",
+        order_by="date desc",
+    )
+    if reverse_rate and flt(reverse_rate) > 0:
+        return flt(1 / flt(reverse_rate), 9)
+
+    return 0
