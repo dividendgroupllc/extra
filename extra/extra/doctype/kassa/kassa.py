@@ -43,7 +43,16 @@ class Kassa(Document):
         self.cancel_linked_entries()
 
     def create_payment_entry(self):
-        """Customer/Supplier/Employee uchun Payment Entry yaratish"""
+        """Customer/Supplier/Employee uchun Payment Entry yaratish
+
+        Kassa valyutasi (masalan UZS) kontragent hisobi valyutasidan
+        (masalan USD) farq qilishi mumkin. `amount` har doim kassa
+        valyutasida kiritiladi; kontragent tomonidagi summa
+        `get_company_exchange_rate` orqali kompaniya valyutasiga
+        aylantirib, so'ng kontragent valyutasiga qaytarib hisoblanadi —
+        shu bilan ikkala tomon kompaniya valyutasida teng bo'lib qoladi
+        va avtomatik konvertatsiya sodir bo'ladi.
+        """
         payment_type = "Receive" if self.transaction_type == "Приход" else "Pay"
 
         pe = frappe.new_doc("Payment Entry")
@@ -57,8 +66,27 @@ class Kassa(Document):
         # Set accounts
         pe.paid_from = self.get_paid_from_account(payment_type)
         pe.paid_to = self.get_paid_to_account(payment_type)
-        pe.paid_amount = flt(self.amount)
-        pe.received_amount = flt(self.amount)
+
+        from_currency = frappe.get_cached_value("Account", pe.paid_from, "account_currency")
+        to_currency = frappe.get_cached_value("Account", pe.paid_to, "account_currency")
+
+        pe.source_exchange_rate = self.get_company_exchange_rate(from_currency)
+        pe.target_exchange_rate = self.get_company_exchange_rate(to_currency)
+
+        amount = flt(self.amount)
+        if from_currency == to_currency:
+            pe.paid_amount = amount
+            pe.received_amount = amount
+        elif payment_type == "Pay":
+            # Расход: kassa (cash_account) — paid_from, kontragent — paid_to
+            pe.paid_amount = amount
+            company_amount = flt(amount * pe.source_exchange_rate, 2)
+            pe.received_amount = flt(company_amount / pe.target_exchange_rate, 2)
+        else:
+            # Приход: kontragent — paid_from, kassa (cash_account) — paid_to
+            pe.received_amount = amount
+            company_amount = flt(amount * pe.target_exchange_rate, 2)
+            pe.paid_amount = flt(company_amount / pe.source_exchange_rate, 2)
 
         # Set reference to Kassa
         pe.reference_no = self.name
@@ -173,30 +201,75 @@ class Kassa(Document):
             frappe.throw(_("Тип контрагента Дивиденд разрешен только для операции Расход"))
 
     def append_cash_counterparty_rows(self, je, counterparty_account, counterparty_values=None):
-        """Append balanced cash/counterparty rows based on transaction direction."""
+        """Append balanced cash/counterparty rows based on transaction direction.
+
+        Cash account va counterparty account boshqa-boshqa valyutada
+        bo'lishi mumkin (masalan Kassa D8 — UZS, xarajat hisobi —
+        kompaniya valyutasi USD). Ilgari ikkala qatorga ham xom
+        `self.amount` "debit"/"credit" (kompaniya valyutasi) maydoniga
+        to'g'ridan-to'g'ri yozilardi va `je.multi_currency` hech qachon
+        o'rnatilmasdi — shu sabab ERPNext "Please check Multi Currency
+        option to allow accounts with other currency" bilan submit'ni rad
+        etardi, va agar shu tekshiruv chetlab o'tilganda ham 120 000 so'm
+        xarajat 120 000 DOLLAR sifatida yozilib qolardi. Endi har bir
+        qator O'Z hisobi valyutasida, kompaniya valyutasiga esa
+        `get_company_exchange_rate` (oxirgi Currency Exchange yozuvi)
+        orqali aylantirib yoziladi — ikkala qatorning kompaniya
+        valyutasidagi summasi teng bo'lib qoladi (Total Debit = Total
+        Credit), amount so'm/dollar aralashib ketmaydi.
+        """
         amount = flt(self.amount)
-        cash_values = {"account": self.cash_account}
-        counterparty_row = {"account": counterparty_account}
+        company_currency = frappe.get_cached_value("Company", self.company, "default_currency")
+
+        cash_currency = self.cash_account_currency or frappe.get_cached_value(
+            "Account", self.cash_account, "account_currency"
+        )
+        counterparty_currency = frappe.get_cached_value(
+            "Account", counterparty_account, "account_currency"
+        )
+
+        cash_rate = self.get_company_exchange_rate(cash_currency)
+        counterparty_rate = self.get_company_exchange_rate(counterparty_currency) or 1
+
+        # `amount` kassa o'z valyutasida kiritilgan (masalan 120 000 so'm).
+        # Kompaniya valyutasidagi (USD) qiymat — ikkala qator uchun ham
+        # BITTA, muvozanatni ta'minlaydigan asosiy summa.
+        company_amount = flt(amount * cash_rate, 2)
+        counterparty_amount = flt(company_amount / counterparty_rate, 2)
+
+        cash_values = {
+            "account": self.cash_account,
+            "account_currency": cash_currency,
+            "exchange_rate": cash_rate,
+        }
+        counterparty_row = {
+            "account": counterparty_account,
+            "account_currency": counterparty_currency,
+            "exchange_rate": counterparty_rate,
+        }
         counterparty_row.update(counterparty_values or {})
 
         if self.transaction_type == "Приход":
             cash_values.update({
                 "debit_in_account_currency": amount,
-                "debit": amount,
+                "debit": company_amount,
             })
             counterparty_row.update({
-                "credit_in_account_currency": amount,
-                "credit": amount,
+                "credit_in_account_currency": counterparty_amount,
+                "credit": company_amount,
             })
         else:
             cash_values.update({
                 "credit_in_account_currency": amount,
-                "credit": amount,
+                "credit": company_amount,
             })
             counterparty_row.update({
-                "debit_in_account_currency": amount,
-                "debit": amount,
+                "debit_in_account_currency": counterparty_amount,
+                "debit": company_amount,
             })
+
+        if cash_currency != company_currency or counterparty_currency != company_currency:
+            je.multi_currency = 1
 
         je.append("accounts", cash_values)
         je.append("accounts", counterparty_row)
@@ -536,7 +609,14 @@ class Kassa(Document):
             )
 
     def validate_currency(self):
-        """Cash account va Party valyutasi mos kelishini tekshirish"""
+        """Cash account va Party valyutasi mos kelmasa, konvertatsiya kursi mavjudligini tekshirish
+
+        Valyutalar mos kelmasa ham operatsiya bloklanmaydi — masalan
+        so'mdagi kassadan dollarlik kontragentga to'lash mumkin,
+        `create_payment_entry` buni avtomatik aylantiradi. Bu yerda esa
+        `get_company_exchange_rate` orqali kurs topilishi oldindan
+        tekshiriladi, aks holda submit vaqtida tushunarli xatolik chiqadi.
+        """
         if self.transaction_type not in ["Приход", "Расход"]:
             return
 
@@ -547,11 +627,8 @@ class Kassa(Document):
             return
 
         if self.cash_account_currency != self.party_currency:
-            frappe.throw(
-                _("Валюта кассы ({0}) не совпадает с валютой контрагента ({1}). Выберите соответствующий способ оплаты.").format(
-                    self.cash_account_currency, self.party_currency
-                )
-            )
+            self.get_company_exchange_rate(self.cash_account_currency)
+            self.get_company_exchange_rate(self.party_currency)
 
 
 @frappe.whitelist()

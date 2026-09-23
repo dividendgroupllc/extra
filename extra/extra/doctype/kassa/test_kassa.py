@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
+from frappe.utils import flt
 
 from erpnext.controllers.tests.test_accounts_controller import make_customer
 
@@ -66,6 +67,24 @@ class TestKassa(FrappeTestCase):
         )
         return {row.account: row for row in accounts}
 
+    def expected_counterparty_native_amount(self, kassa, amount):
+        """Kassa (cash_account) dan counterparty accountga kompaniya
+        valyutasi orqali aylantirilgan, o'z valyutasidagi kutilgan summa —
+        cash_account va counterparty account boshqa-boshqa valyutada
+        bo'lganda (masalan Terminal D8 UZS, xarajat hisobi kompaniya
+        valyutasi USDda) append_cash_counterparty_rows bilan bir xil
+        formula."""
+        cash_currency = frappe.get_cached_value(
+            "Account", self.cash_account, "account_currency"
+        )
+        expense_currency = frappe.get_cached_value(
+            "Account", self.expense_account, "account_currency"
+        )
+        cash_rate = kassa.get_company_exchange_rate(cash_currency)
+        counterparty_rate = kassa.get_company_exchange_rate(expense_currency) or 1
+        company_amount = flt(amount * cash_rate, 2)
+        return flt(company_amount / counterparty_rate, 2)
+
     def test_expense_journal_entry_for_expense_outflow(self):
         doc = self.make_kassa_doc()
         doc.insert()
@@ -73,11 +92,12 @@ class TestKassa(FrappeTestCase):
 
         kassa = frappe.get_doc("Kassa", doc.name)
         self.assertEqual(kassa.linked_doctype, "Journal Entry")
+        expected_expense_amount = self.expected_counterparty_native_amount(kassa, 150)
 
         accounts = self.get_journal_accounts(kassa.linked_entry)
         self.assertEqual(accounts[self.cash_account].credit_in_account_currency, 150)
         self.assertEqual(accounts[self.cash_account].debit_in_account_currency, 0)
-        self.assertEqual(accounts[self.expense_account].debit_in_account_currency, 150)
+        self.assertEqual(accounts[self.expense_account].debit_in_account_currency, expected_expense_amount)
         self.assertEqual(accounts[self.expense_account].credit_in_account_currency, 0)
 
     def test_expense_journal_entry_for_expense_inflow(self):
@@ -87,11 +107,12 @@ class TestKassa(FrappeTestCase):
 
         kassa = frappe.get_doc("Kassa", doc.name)
         self.assertEqual(kassa.linked_doctype, "Journal Entry")
+        expected_expense_amount = self.expected_counterparty_native_amount(kassa, 150)
 
         accounts = self.get_journal_accounts(kassa.linked_entry)
         self.assertEqual(accounts[self.cash_account].debit_in_account_currency, 150)
         self.assertEqual(accounts[self.cash_account].credit_in_account_currency, 0)
-        self.assertEqual(accounts[self.expense_account].credit_in_account_currency, 150)
+        self.assertEqual(accounts[self.expense_account].credit_in_account_currency, expected_expense_amount)
         self.assertEqual(accounts[self.expense_account].debit_in_account_currency, 0)
 
     def test_dividend_is_blocked_for_income(self):
@@ -125,6 +146,73 @@ class TestKassa(FrappeTestCase):
         self.assertEqual(payment_entry.payment_type, "Receive")
         self.assertEqual(payment_entry.paid_to, self.cash_account)
 
+    def test_payment_entry_converts_when_party_currency_differs_from_cash(self):
+        """UZS kassadan USD kontragentga (yoki aksincha) to'lov — avtomatik
+        konvertatsiya bilan Payment Entry yaratilishi kerak, xatolik emas."""
+        fake_payment_entry = SimpleNamespace(
+            flags=SimpleNamespace(ignore_permissions=False),
+            name="ACC-PAY-TEST-0002",
+            insert=MagicMock(),
+            submit=MagicMock(),
+        )
+        doc = self.make_kassa_doc(
+            transaction_type="Расход",
+            party_type="Supplier",
+            party="_Test Supplier USD",
+            expense_account=None,
+            amount=1250000,
+            mode_of_payment="UZS Cash",
+        )
+        doc.name = "KASSA-TEST-0002"
+        doc.get_paid_from_account = MagicMock(return_value="Cash UZS")
+        doc.get_paid_to_account = MagicMock(return_value="Creditors USD")
+        doc.get_company_exchange_rate = MagicMock(
+            side_effect=lambda currency: 1 if currency == "USD" else 0.00008
+        )
+
+        with (
+            patch(
+                "extra.extra.doctype.kassa.kassa.frappe.get_cached_value",
+                side_effect=["UZS", "USD"],
+            ),
+            patch(
+                "extra.extra.doctype.kassa.kassa.frappe.new_doc",
+                return_value=fake_payment_entry,
+            ),
+            patch("extra.extra.doctype.kassa.kassa.frappe.db.set_value"),
+            patch("extra.extra.doctype.kassa.kassa.frappe.msgprint"),
+            patch(
+                "extra.extra.doctype.kassa.kassa.frappe.utils.get_link_to_form",
+                return_value="PAYMENT-LINK",
+            ),
+        ):
+            doc.create_payment_entry()
+
+        self.assertEqual(fake_payment_entry.payment_type, "Pay")
+        self.assertEqual(fake_payment_entry.paid_from, "Cash UZS")
+        self.assertEqual(fake_payment_entry.paid_to, "Creditors USD")
+        self.assertEqual(fake_payment_entry.paid_amount, 1250000)
+        self.assertEqual(fake_payment_entry.source_exchange_rate, 0.00008)
+        self.assertEqual(fake_payment_entry.target_exchange_rate, 1)
+        self.assertEqual(fake_payment_entry.received_amount, 100)
+        fake_payment_entry.insert.assert_called_once_with()
+        fake_payment_entry.submit.assert_called_once_with()
+
+    def test_validate_currency_allows_mismatch_when_rate_resolvable(self):
+        doc = self.make_kassa_doc(
+            transaction_type="Расход",
+            party_type="Supplier",
+            party="_Test Supplier USD",
+            expense_account=None,
+        )
+        doc.cash_account_currency = "UZS"
+        doc.party_currency = "USD"
+        doc.get_company_exchange_rate = MagicMock(return_value=0.00008)
+
+        doc.validate_currency()
+
+        doc.get_company_exchange_rate.assert_any_call("UZS")
+        doc.get_company_exchange_rate.assert_any_call("USD")
 
     def test_submit_routes_conversion_to_internal_transfer_creator(self):
         doc = self.make_kassa_doc(
