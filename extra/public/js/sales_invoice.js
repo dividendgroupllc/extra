@@ -11,6 +11,7 @@
 //
 // Standart discount_amount (yashirin) faqat dona narxga bo'linmaydigan bir
 // necha tiyin qoldiqni oladi — jami summa kiritilgan qiymatga aniq teng.
+// Chegirma tovarlar summasidan oshsa POS kabi qirqiladi (eng ko'pi 100%).
 // Qaytarish, "cash/non trade discount" va soliqli Grand Total chegirmasida
 // taqsimlanmaydi: butun summa standart discount_amount'ga yoziladi.
 
@@ -91,12 +92,24 @@ function extra_apply_total_discount(frm) {
 	const can_distribute =
 		target > 0 &&
 		gross > 0 &&
-		target < gross &&
 		!cint(doc.is_return) &&
 		!cint(doc.is_cash_or_non_trade_discount) &&
 		!(doc.apply_discount_on === "Grand Total" && flt(doc.total_taxes_and_charges));
 
 	if (can_distribute) {
+		// POS kabi: chegirma tovarlar summasidan oshmaydi — ortiqchasi qirqiladi
+		// (eng ko'pi 100%, jami 0)
+		if (target > flt(gross, prec)) {
+			target = flt(gross, prec);
+			doc.extra_discount_amount = target;
+			if (flt(doc.extra_discount_percentage)) doc.extra_discount_percentage = 100;
+			frappe.show_alert({
+				message: __("Chegirma tovarlar summasidan oshmaydi. Qo'llangan chegirma: {0}", [
+					format_currency(target, doc.currency),
+				]),
+				indicator: "orange",
+			});
+		}
 		const units = extra_split_discount(lines, target, prec);
 		lines.forEach((d) => {
 			const unit = units[d.name];
@@ -108,11 +121,6 @@ function extra_apply_total_discount(frm) {
 			distributed += unit * flt(d.qty);
 		});
 		distributed = flt(distributed, prec);
-	} else if (target >= gross && target > 0) {
-		frappe.show_alert({
-			message: __("Umumiy chegirma tovarlar summasidan katta"),
-			indicator: "orange",
-		});
 	}
 
 	frm.__extra_distributing = true;
