@@ -247,10 +247,8 @@ doctype_js = {"Sales Invoice": "public/js/sales_invoice.js"}
 # List of apps whose translatable strings should be excluded from this app's translations.
 # ignore_translatable_strings_from = []
 
-# Sales Invoice Item jadvalida har qatorning chegirmasi ko'rinishi uchun
+# Sales Invoice: "Umumiy chegirma" maydonlari va Item jadvalidagi chegirma ustuni
 fixtures = [
-	{
-		"dt": "Property Setter",
-		"filters": [["name", "like", "Sales Invoice Item-%"], ["module", "=", "Extra"]],
-	}
+	{"dt": "Custom Field", "filters": [["module", "=", "Extra"]]},
+	{"dt": "Property Setter", "filters": [["module", "=", "Extra"]]},
 ]
